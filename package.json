@@ -4,6 +4,7 @@
   "private": true,
   "description": "Zero-storage, peer-to-peer local file and text transfer progressive web app",
   "scripts": {
+    "build": "npm --prefix client install && npm --prefix client run build",
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
     "server:start": "npm --prefix server run start",
