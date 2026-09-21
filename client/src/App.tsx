@@ -153,7 +153,7 @@ export const App: React.FC = () => {
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-base tracking-tight text-zinc-900 dark:text-zinc-50">
-                  AirShare
+                  AirShare <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">by K2C</span>
                 </span>
                 <span className="text-[10px] uppercase font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
                   P2P PWA
@@ -410,7 +410,7 @@ export const App: React.FC = () => {
       {/* FOOTER */}
       <footer className="w-full border-t border-zinc-200/60 dark:border-zinc-800/60 py-4 text-center text-xs text-zinc-400 dark:text-zinc-600">
         <div className="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>AirShare — Zero-Storage Peer-to-Peer Transfer</span>
+          <span>AirShare by K2C — Zero-Storage Peer-to-Peer Transfer</span>
           <div className="flex items-center gap-3">
             <span>RTCDataChannel 64KB Slices</span>
             <span>•</span>

@@ -143,7 +143,7 @@ export const RoomLobby: React.FC<RoomLobbyProps> = ({
             Waiting for Peer to Connect
           </h2>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-            Buka AirShare di perangkat kedua dan masukkan Room Code & PIN di bawah.
+            Buka AirShare by K2C di perangkat kedua dan masukkan Room Code & PIN di bawah.
           </p>
         </div>
 

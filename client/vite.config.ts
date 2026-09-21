@@ -9,9 +9,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'logo.svg'],
       manifest: {
-        name: 'AirShare - P2P File & Text Transfer',
-        short_name: 'AirShare',
-        description: 'Zero-storage, peer-to-peer fast file and text transfer using WebRTC DataChannel',
+        name: 'AirShare by K2C - P2P File & Text Transfer',
+        short_name: 'AirShare by K2C',
+        description: 'Zero-storage, peer-to-peer fast file and text transfer by K2C',
         theme_color: '#ffffff',
         background_color: '#ffffff',
         display: 'standalone',
