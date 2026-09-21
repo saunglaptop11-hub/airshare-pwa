@@ -78,6 +78,21 @@ export function generateUUID(): string {
   });
 }
 
+const ROOM_ID_CHARACTERS = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+export function generateRoomId(): string {
+  let roomId = '';
+  for (let i = 0; i < 6; i++) {
+    const randomIndex = Math.floor(Math.random() * ROOM_ID_CHARACTERS.length);
+    roomId += ROOM_ID_CHARACTERS[randomIndex];
+  }
+  return roomId;
+}
+
+export function generatePin(): string {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+
 /**
  * Universally downloads or natively saves a file/photo to device storage.
  * On mobile devices (Android & iOS), uses Web Share API so the user can

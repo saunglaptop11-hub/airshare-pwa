@@ -35,3 +35,7 @@ lerna-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Cloudflared binary
+cloudflared.exe
+*.exe

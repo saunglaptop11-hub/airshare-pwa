@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type {
-  SignalingStatus,
-  RoomState,
-  InboundSignalingMessage,
-  OutboundSignalingMessage,
-} from '../types/webrtc';
+import mqtt, { type MqttClient } from 'mqtt';
+import type { SignalingStatus, RoomState } from '../types/webrtc';
+import { generateUUID, generateRoomId, generatePin } from '../utils/formatters';
+
+const PUBLIC_MQTT_BROKER = 'wss://broker.emqx.io:8084/mqtt';
 
 interface UseSignalingOptions {
   serverUrl?: string;
@@ -16,24 +15,6 @@ interface UseSignalingOptions {
 export function useSignaling(options: UseSignalingOptions = {}) {
   const { onSignal, onPeerJoined, onPeerLeft } = options;
 
-  // Determine WebSocket URL:
-  // 1. If options.serverUrl is explicitly provided, use it.
-  // 2. If VITE_SIGNALING_URL is configured (e.g. on Vercel), connect directly to the signaling server.
-  // 3. Otherwise use the same host via /ws proxy (which works for localhost AND LAN IP on port 5173).
-  // 4. Fallback to :8080 if not running in a browser.
-  const resolveServerUrl = () => {
-    if (options.serverUrl) return options.serverUrl;
-    if (import.meta.env.VITE_SIGNALING_URL) {
-      return import.meta.env.VITE_SIGNALING_URL;
-    }
-    if (typeof window !== 'undefined') {
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      // Use the Vite proxy path /ws on the same host & port (bypasses Windows firewall for port 8080)
-      return `${wsProtocol}//${window.location.host}/ws`;
-    }
-    return 'ws://localhost:8080';
-  };
-
   const [status, setStatus] = useState<SignalingStatus>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [roomState, setRoomState] = useState<RoomState>({
@@ -44,9 +25,9 @@ export function useSignaling(options: UseSignalingOptions = {}) {
     remotePeerId: null,
   });
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const pendingActionRef = useRef<OutboundSignalingMessage | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clientRef = useRef<MqttClient | null>(null);
+  const roomStateRef = useRef<RoomState>(roomState);
+  const joinTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isDestroyedRef = useRef(false);
 
   const onSignalRef = useRef(onSignal);
@@ -54,105 +35,117 @@ export function useSignaling(options: UseSignalingOptions = {}) {
   const onPeerLeftRef = useRef(onPeerLeft);
 
   useEffect(() => {
+    roomStateRef.current = roomState;
+  }, [roomState]);
+
+  useEffect(() => {
     onSignalRef.current = onSignal;
     onPeerJoinedRef.current = onPeerJoined;
     onPeerLeftRef.current = onPeerLeft;
   });
 
-  const send = useCallback((message: OutboundSignalingMessage) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(message));
-      return true;
-    }
-    console.warn('[Signaling] WebSocket is not open. Queueing message:', message.type);
-    pendingActionRef.current = message;
-    return false;
-  }, []);
-
   const connect = useCallback(() => {
     if (isDestroyedRef.current) return;
+    if (clientRef.current && clientRef.current.connected) return;
 
-    if (
-      wsRef.current &&
-      (wsRef.current.readyState === WebSocket.OPEN ||
-        wsRef.current.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
-    }
-
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-
-    const url = resolveServerUrl();
     setStatus('connecting');
     setError(null);
 
-    try {
-      console.log(`[Signaling] Connecting to ${url}...`);
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
+    const brokerUrl = options.serverUrl || import.meta.env.VITE_SIGNALING_URL || PUBLIC_MQTT_BROKER;
+    console.log(`[Signaling] Connecting to cloud signaling relay: ${brokerUrl}`);
 
-      ws.onopen = () => {
-        if (wsRef.current !== ws) return;
-        console.log('[Signaling] Connected successfully.');
+    try {
+      const client = mqtt.connect(brokerUrl, {
+        keepalive: 60,
+        reconnectPeriod: 3000,
+        connectTimeout: 10000,
+        clean: true,
+      });
+
+      clientRef.current = client;
+
+      client.on('connect', () => {
+        if (clientRef.current !== client) return;
+        console.log('[Signaling] Cloud signaling relay connected.');
         setStatus('connected');
         setError(null);
+      });
 
-        // Process any queued pending action
-        if (pendingActionRef.current) {
-          const action = pendingActionRef.current;
-          pendingActionRef.current = null;
-          console.log('[Signaling] Dispatching queued action:', action.type);
-          ws.send(JSON.stringify(action));
-        }
-      };
-
-      ws.onmessage = (event) => {
+      client.on('message', (topic: string, payloadBuffer: Buffer) => {
         try {
-          const msg = JSON.parse(event.data) as InboundSignalingMessage;
+          const raw = payloadBuffer.toString();
+          const msg = JSON.parse(raw);
+          const currentRoom = roomStateRef.current;
+
+          console.log(`[Signaling] Message on topic ${topic}:`, msg.type);
 
           switch (msg.type) {
-            case 'room-created': {
-              setRoomState({
-                roomId: msg.roomId,
-                pin: msg.pin,
-                isHost: true,
-                localPeerId: msg.peerId,
-                remotePeerId: null,
-              });
-              setError(null);
-              break;
-            }
+            case 'join-request': {
+              // Host receives join request from client
+              if (!currentRoom.isHost || !currentRoom.roomId) return;
 
-            case 'joined': {
-              setRoomState({
-                roomId: msg.roomId,
-                pin: null,
-                isHost: false,
-                localPeerId: msg.peerId,
-                remotePeerId: msg.remotePeerId || null,
-              });
-              setError(null);
-              if (msg.remotePeerId && onPeerJoinedRef.current) {
-                onPeerJoinedRef.current(msg.remotePeerId);
+              if (msg.pin !== currentRoom.pin) {
+                console.warn('[Signaling] Client sent invalid PIN:', msg.pin);
+                const rejectTopic = `airshare/v1/${currentRoom.roomId}/to_client`;
+                client.publish(
+                  rejectTopic,
+                  JSON.stringify({
+                    type: 'error',
+                    message: 'PIN 4 digit salah untuk room ini.',
+                  })
+                );
+                return;
               }
-              break;
-            }
 
-            case 'peer-joined': {
+              // Valid PIN: Accept joiner
+              console.log(`[Signaling] Peer ${msg.peerId} successfully authenticated with PIN.`);
               setRoomState((prev) => ({
                 ...prev,
                 remotePeerId: msg.peerId,
               }));
+
+              const acceptTopic = `airshare/v1/${currentRoom.roomId}/to_client`;
+              client.publish(
+                acceptTopic,
+                JSON.stringify({
+                  type: 'joined',
+                  roomId: currentRoom.roomId,
+                  peerId: msg.peerId,
+                  remotePeerId: currentRoom.localPeerId,
+                })
+              );
+
               if (onPeerJoinedRef.current) {
                 onPeerJoinedRef.current(msg.peerId);
               }
               break;
             }
 
+            case 'joined': {
+              // Joiner receives confirmation from host
+              if (joinTimeoutRef.current) {
+                clearTimeout(joinTimeoutRef.current);
+                joinTimeoutRef.current = null;
+              }
+
+              console.log('[Signaling] Joined room confirmed by host:', msg.remotePeerId);
+              setRoomState((prev) => ({
+                ...prev,
+                roomId: msg.roomId,
+                remotePeerId: msg.remotePeerId,
+              }));
+              setError(null);
+
+              if (onPeerJoinedRef.current) {
+                onPeerJoinedRef.current(msg.remotePeerId);
+              }
+              break;
+            }
+
             case 'signal': {
+              // Ignore own signals
+              if (msg.senderId === currentRoom.localPeerId) return;
+
               if (onSignalRef.current) {
                 onSignalRef.current(msg.senderId, msg.data);
               }
@@ -160,6 +153,8 @@ export function useSignaling(options: UseSignalingOptions = {}) {
             }
 
             case 'peer-left': {
+              if (msg.peerId === currentRoom.localPeerId) return;
+              console.log(`[Signaling] Peer ${msg.peerId} left the room.`);
               setRoomState((prev) => ({
                 ...prev,
                 remotePeerId: null,
@@ -170,18 +165,11 @@ export function useSignaling(options: UseSignalingOptions = {}) {
               break;
             }
 
-            case 'left': {
-              setRoomState({
-                roomId: null,
-                pin: null,
-                isHost: false,
-                localPeerId: null,
-                remotePeerId: null,
-              });
-              break;
-            }
-
             case 'error': {
+              if (joinTimeoutRef.current) {
+                clearTimeout(joinTimeoutRef.current);
+                joinTimeoutRef.current = null;
+              }
               console.error('[Signaling Server Error]:', msg.message);
               setError(msg.message);
               break;
@@ -190,44 +178,33 @@ export function useSignaling(options: UseSignalingOptions = {}) {
             default:
               break;
           }
-        } catch (parseErr) {
-          console.error('[Signaling] Failed to parse message:', parseErr);
+        } catch (err) {
+          console.error('[Signaling] Failed to parse message:', err);
         }
-      };
+      });
 
-      ws.onerror = (e) => {
-        console.error('[Signaling] WebSocket error:', e);
-        if (wsRef.current === ws) {
+      client.on('error', (err) => {
+        console.error('[Signaling] Relay error:', err);
+        if (clientRef.current === client) {
           setStatus('error');
-          setError('Signaling server unreachable. Retrying automatically...');
+          setError('Relay signaling sedang menyambungkan kembali...');
         }
-      };
+      });
 
-      ws.onclose = () => {
-        if (wsRef.current === ws) {
-          console.warn('[Signaling] WebSocket closed.');
+      client.on('close', () => {
+        if (clientRef.current === client) {
           setStatus('disconnected');
-          wsRef.current = null;
-
-          // Automatically schedule reconnect
-          if (!isDestroyedRef.current) {
-            reconnectTimeoutRef.current = setTimeout(() => {
-              connect();
-            }, 2000);
-          }
         }
-      };
+      });
+
+      client.on('reconnect', () => {
+        setStatus('connecting');
+      });
     } catch (err) {
-      console.error('[Signaling] Connection initialization failed:', err);
+      console.error('[Signaling] Failed to initialize connection:', err);
       setStatus('error');
-      setError('Failed to initiate WebSocket connection. Retrying...');
-      if (!isDestroyedRef.current) {
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
-        }, 2000);
-      }
     }
-  }, []);
+  }, [options.serverUrl]);
 
   useEffect(() => {
     isDestroyedRef.current = false;
@@ -235,59 +212,162 @@ export function useSignaling(options: UseSignalingOptions = {}) {
 
     return () => {
       isDestroyedRef.current = true;
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+      if (joinTimeoutRef.current) {
+        clearTimeout(joinTimeoutRef.current);
       }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      if (clientRef.current) {
+        clientRef.current.end(true);
+        clientRef.current = null;
       }
     };
   }, [connect]);
 
   const createRoom = useCallback(() => {
     setError(null);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      send({ type: 'create-room' });
-    } else {
-      console.log('[Signaling] Connecting and queueing create-room...');
-      pendingActionRef.current = { type: 'create-room' };
+    const client = clientRef.current;
+    if (!client) {
       connect();
+      return;
     }
-  }, [send, connect]);
+
+    const roomId = generateRoomId();
+    const pin = generatePin();
+    const localPeerId = generateUUID();
+
+    const hostTopic = `airshare/v1/${roomId}/to_host`;
+    client.subscribe(hostTopic, (err) => {
+      if (err) {
+        console.error('[Signaling] Failed to subscribe to host topic:', err);
+        setError('Gagal membuat room. Coba beberapa saat lagi.');
+        return;
+      }
+
+      console.log(`[Signaling] Room ${roomId} created with PIN ${pin}`);
+      setRoomState({
+        roomId,
+        pin,
+        isHost: true,
+        localPeerId,
+        remotePeerId: null,
+      });
+      setError(null);
+    });
+  }, [connect]);
 
   const joinRoom = useCallback(
     (roomId: string, pin: string) => {
       setError(null);
-      const msg: OutboundSignalingMessage = {
-        type: 'join-room',
-        roomId: roomId.trim().toUpperCase(),
-        pin: pin.trim(),
-      };
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        send(msg);
-      } else {
-        console.log('[Signaling] Connecting and queueing join-room...');
-        pendingActionRef.current = msg;
-        connect();
+      const cleanRoomId = roomId.trim().toUpperCase();
+      const cleanPin = pin.trim();
+
+      if (!cleanRoomId || !cleanPin) {
+        setError('Room ID dan PIN 4-digit harus diisi.');
+        return;
       }
+
+      const client = clientRef.current;
+      if (!client) {
+        connect();
+        return;
+      }
+
+      const localPeerId = generateUUID();
+      const clientTopic = `airshare/v1/${cleanRoomId}/to_client`;
+      const hostTopic = `airshare/v1/${cleanRoomId}/to_host`;
+
+      setRoomState({
+        roomId: cleanRoomId,
+        pin: null,
+        isHost: false,
+        localPeerId,
+        remotePeerId: null,
+      });
+
+      client.subscribe(clientTopic, (err) => {
+        if (err) {
+          console.error('[Signaling] Failed to subscribe to client topic:', err);
+          setError('Gagal bergabung ke room.');
+          return;
+        }
+
+        console.log(`[Signaling] Sending join request to room ${cleanRoomId}...`);
+        client.publish(
+          hostTopic,
+          JSON.stringify({
+            type: 'join-request',
+            pin: cleanPin,
+            peerId: localPeerId,
+          })
+        );
+
+        // Timeout if host doesn't respond
+        if (joinTimeoutRef.current) clearTimeout(joinTimeoutRef.current);
+        joinTimeoutRef.current = setTimeout(() => {
+          setError(`Room "${cleanRoomId}" tidak ditemukan atau host sedang offline.`);
+          setRoomState({
+            roomId: null,
+            pin: null,
+            isHost: false,
+            localPeerId: null,
+            remotePeerId: null,
+          });
+        }, 8000);
+      });
     },
-    [send, connect]
+    [connect]
   );
 
   const sendSignal = useCallback(
-    (targetId: string, data: RTCSessionDescriptionInit | RTCIceCandidateInit) => {
-      send({
-        type: 'signal',
-        targetId,
-        data,
-      });
+    (_targetId: string, data: RTCSessionDescriptionInit | RTCIceCandidateInit) => {
+      const client = clientRef.current;
+      const currentRoom = roomStateRef.current;
+      if (!client || !currentRoom.roomId || !currentRoom.localPeerId) return;
+
+      const targetTopic = currentRoom.isHost
+        ? `airshare/v1/${currentRoom.roomId}/to_client`
+        : `airshare/v1/${currentRoom.roomId}/to_host`;
+
+      client.publish(
+        targetTopic,
+        JSON.stringify({
+          type: 'signal',
+          senderId: currentRoom.localPeerId,
+          data,
+        })
+      );
     },
-    [send]
+    []
   );
 
   const leaveRoom = useCallback(() => {
-    send({ type: 'leave-room' });
+    const client = clientRef.current;
+    const currentRoom = roomStateRef.current;
+
+    if (joinTimeoutRef.current) {
+      clearTimeout(joinTimeoutRef.current);
+      joinTimeoutRef.current = null;
+    }
+
+    if (client && currentRoom.roomId) {
+      const targetTopic = currentRoom.isHost
+        ? `airshare/v1/${currentRoom.roomId}/to_client`
+        : `airshare/v1/${currentRoom.roomId}/to_host`;
+
+      client.publish(
+        targetTopic,
+        JSON.stringify({
+          type: 'peer-left',
+          peerId: currentRoom.localPeerId,
+        })
+      );
+
+      const topicToUnsub = currentRoom.isHost
+        ? `airshare/v1/${currentRoom.roomId}/to_host`
+        : `airshare/v1/${currentRoom.roomId}/to_client`;
+
+      client.unsubscribe(topicToUnsub);
+    }
+
     setRoomState({
       roomId: null,
       pin: null,
@@ -295,7 +375,8 @@ export function useSignaling(options: UseSignalingOptions = {}) {
       localPeerId: null,
       remotePeerId: null,
     });
-  }, [send]);
+    setError(null);
+  }, []);
 
   const clearError = useCallback(() => {
     setError(null);

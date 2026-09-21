@@ -9,6 +9,7 @@
     "server:start": "npm --prefix server run start",
     "client:dev": "npm --prefix client run dev",
     "client:build": "npm --prefix client run build",
-    "client:preview": "npm --prefix client run preview"
+    "client:preview": "npm --prefix client run preview",
+    "tunnel": ".\\cloudflared.exe tunnel --url http://localhost:5173"
   }
 }
